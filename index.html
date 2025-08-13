@@ -1,4 +1,3 @@
-index.html
 <!doctype html>
 <html lang="no">
 <head>
@@ -9,18 +8,18 @@ index.html
     html, body { height: 100%; margin: 0; }
     body { background: #0b0f19; color: #fff; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji"; }
     canvas { display: block; width: 100vw; height: 100vh; }
-    /* Hide any default focus outline on canvas for nicer PWA-like feel */
     canvas:focus { outline: none; }
   </style>
-  <!-- Firebase (optional, only if you want multi-phone single-killer rounds on GitHub Pages). 
-       If you won't use Firebase, you can delete these 3 lines and the app falls back to local-only play. -->
+  <!-- Firebase SDK (for multi-device single-killer rounds). Keep these exactly in this order. -->
   <script defer src="https://www.gstatic.com/firebasejs/10.11.1/firebase-app-compat.js"></script>
   <script defer src="https://www.gstatic.com/firebasejs/10.11.1/firebase-firestore-compat.js"></script>
 </head>
 <body>
 <canvas id="c" tabindex="0" aria-label="Moro med Mord" role="application"></canvas>
 <script>
-(() => {
+// Delay app start until window 'load' so Firebase SDKs (defer) are guaranteed to be ready.
+window.addEventListener('load', function(){
+(function(){
   "use strict";
 
   // ——————————————————————————————————————————————
@@ -32,12 +31,11 @@ index.html
     "en hatt","en håndpistol","en katt","en paraply","en skje","en gummistøvel","en baguette","en fisk","en kaktus","en laserpeker","en badeand","en pizzaskjærer","en bok","en sykkelpumpe","et bananskall","en tomat","en lommelykt","en tulipan","en hårføner","en vannballong"
   ];
 
-  // OPTIONAL multi-device backend. Set to true once you paste your Firebase config below.
-  let USE_FIREBASE = true; // <-- flip to true when deploying on GitHub Pages with Firebase
+  // Toggle Firebase usage. Must be true + valid FIREBASE_CONFIG for online lobby.
+  let USE_FIREBASE = true;
 
-  // Paste your Firebase config here (from Firebase console → Project settings → SDK setup & config)
-  // If you don't paste it, leave USE_FIREBASE=false above to keep local-only mode.
-  const FIREBASE_CONFIG = {
+  // Paste your Firebase config here
+ const FIREBASE_CONFIG = {
     apiKey: "AIzaSyAjWKqzsZkaCOe7iheahP-3oet2E5XIKVM",
     authDomain: "m-med-m.firebaseapp.com",
     projectId: "m-med-m",
@@ -69,11 +67,10 @@ index.html
   const lerp = (a,b,t)=>a+(b-a)*t;
   const clamp = (v, lo, hi)=>Math.max(lo, Math.min(hi, v));
   const easeOutCubic = t => 1 - Math.pow(1-t, 3);
-  const rand = (a,b)=>a+Math.random()*(b-a);
   const pick = arr => arr[Math.floor(Math.random()*arr.length)];
   const uid = () => Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
 
-  // Persisted local identity
+  // Persist local identity
   let local = {
     name: localStorage.getItem("mmm_name") || "",
     room: localStorage.getItem("mmm_room") || "",
@@ -86,11 +83,9 @@ index.html
   // ——————————————————————————————————————————————
   let audioCtx = null, audioEnabled = false; let TEST_MODE = false; let _test_beepCount = 0;
   function initAudio(){
-    try{
-      if(!audioCtx){ audioCtx = new (window.AudioContext||window.webkitAudioContext)(); }
-      if(audioCtx.state === 'suspended'){ audioCtx.resume(); }
-      audioEnabled = true;
-    } catch(e){ audioEnabled = false; }
+    try{ if(!audioCtx){ audioCtx = new (window.AudioContext||window.webkitAudioContext)(); }
+      if(audioCtx.state==='suspended'){ audioCtx.resume(); }
+      audioEnabled = true; } catch(e){ audioEnabled = false; }
   }
   function playBeep(){
     if(TEST_MODE){ _test_beepCount++; return; }
@@ -110,282 +105,202 @@ index.html
   // Game state
   // ——————————————————————————————————————————————
   const State = { Join:"join", Lobby:"lobby", Countdown:"countdown", Result:"result", RoundTimer:"roundtimer" };
-  let state = local.name && local.room ? State.Lobby : State.Join;
-  let countdownStart = 0;         // local receive-time for reveal
+  let state = State.Join;
+  let countdownStart = 0;         // ms (server-aligned when online)
   let result = null;              // { type:"Kill"|"Flee", weapon?:string }
-  let particles = [];
+  let isKiller = false;
+  let timerStartAt = null;        // ms when 120s begins (revealAt + 3s)
 
-  // Shared round model (if Firebase):
-  // roomDoc = { round:{ id, status:'idle'|'active', revealAt: serverTS, killerId, weapon } }
+  // Firebase refs
   let fb = { app:null, db:null, roomRef:null, unsubRoom:null, unsubPlayers:null };
-  let players = [];      // {id,name,lastSeen}
-  let room = null;       // current room doc data
-  let isKiller = false;  // for this device in active round
-  let timerStartAt = null;  // ms epoch when 120s starts (revealAt + 3000)
-
-  // Presence heartbeat if Firebase
+  let room = null;       // room doc
+  let players = [];      // array of player docs
   let heartbeatTimer = null;
 
   // ——————————————————————————————————————————————
-  // Firebase init (optional)
+  // Firebase init (robust)
   // ——————————————————————————————————————————————
   function firebaseAvailable(){
-    return USE_FIREBASE && window.firebase && FIREBASE_CONFIG && FIREBASE_CONFIG.projectId && FIREBASE_CONFIG.projectId !== "PASTE_PROJECT_ID";
+    return USE_FIREBASE && typeof window.firebase !== 'undefined' && FIREBASE_CONFIG && FIREBASE_CONFIG.projectId && !/PASTE_/.test(FIREBASE_CONFIG.projectId);
   }
   async function fbInitIfNeeded(){
     if(!firebaseAvailable()) return false;
     if(!fb.app){
-      try{
-        fb.app = firebase.initializeApp(FIREBASE_CONFIG);
-        fb.db = firebase.firestore();
-        // Firestore settings default ok
-        return true;
-      } catch(e){ console.error(e); USE_FIREBASE=false; return false; }
+      try{ fb.app = firebase.initializeApp(FIREBASE_CONFIG); fb.db = firebase.firestore(); }
+      catch(e){ console.error('Firebase init failed', e); return false; }
     }
     return true;
   }
 
+  // ——————————————————————————————————————————————
+  // Join / presence / room subscriptions
+  // ——————————————————————————————————————————————
   async function joinRoom(name, code){
-    local.name=name.trim(); local.room=code.trim().toUpperCase();
-    localStorage.setItem("mmm_name", local.name);
-    localStorage.setItem("mmm_room", local.room);
+    local.name = (name||'').trim(); local.room = (code||'').trim().toUpperCase();
+    localStorage.setItem('mmm_name', local.name); localStorage.setItem('mmm_room', local.room);
 
-    if(!(await fbInitIfNeeded())){ state = State.Lobby; return; }
+    const ok = await fbInitIfNeeded();
+    if(!ok){ showToast("Backend ikke klar – prøv igjen om 1s"); state = State.Join; return; }
 
-    // room doc
     fb.roomRef = fb.db.collection('rooms').doc(local.room);
     // Ensure room exists
     await fb.roomRef.set({ createdAt: firebase.firestore.FieldValue.serverTimestamp(), round:{ status:'idle', id:0 } }, { merge:true });
 
     // Create/update player doc
-    const pRef = fb.roomRef.collection('players').doc(local.playerId);
-    await pRef.set({ name: local.name, joinedAt: firebase.firestore.FieldValue.serverTimestamp(), lastSeen: firebase.firestore.FieldValue.serverTimestamp() }, { merge:true });
+    await fb.roomRef.collection('players').doc(local.playerId).set({ name: local.name, joinedAt: firebase.firestore.FieldValue.serverTimestamp(), lastSeen: firebase.firestore.FieldValue.serverTimestamp() }, { merge:true });
 
-    // subscribe room
+    // subscribe room doc
     fb.unsubRoom && fb.unsubRoom();
     fb.unsubRoom = fb.roomRef.onSnapshot(snap=>{
       room = snap.data() || null;
       if(room && room.round && room.round.status==='active'){
-        // When a new round is active, compute local clocks
         const revealAt = room.round.revealAt ? room.round.revealAt.toMillis() : Date.now();
-        countdownStart = revealAt; // sync countdown visually (approx)
-        timerStartAt = revealAt + COUNTDOWN_SECONDS*1000; // 120s starts after reveal
+        countdownStart = revealAt; timerStartAt = revealAt + COUNTDOWN_SECONDS*1000;
         isKiller = room.round.killerId === local.playerId;
-        // Prepare local result mapping
         result = { type: isKiller ? 'Kill' : 'Flee', weapon: isKiller ? room.round.weapon : undefined };
-        state = State.Countdown; // everyone goes into countdown upon seeing round
-      } else if(room && room.round && room.round.status==='idle'){
-        // reset to lobby
-        result = null; isKiller=false; timerStartAt=null; state = State.Lobby;
+        state = State.Countdown;
+      } else {
+        // back to lobby
+        result = null; isKiller=false; timerStartAt=null; if(state!==State.Join) state = State.Lobby;
       }
     });
 
-    // subscribe players
+    // subscribe players collection
     fb.unsubPlayers && fb.unsubPlayers();
     fb.unsubPlayers = fb.roomRef.collection('players').onSnapshot(snap=>{
-      const now = Date.now();
       players = snap.docs.map(d=>({ id:d.id, ...d.data() }));
-      // We'll filter actives by lastSeen within 20s when rendering
     });
 
-    // presence heartbeat
+    // heartbeat
     clearInterval(heartbeatTimer);
     heartbeatTimer = setInterval(async ()=>{
-      try{
-        await fb.roomRef.collection('players').doc(local.playerId).set({ lastSeen: firebase.firestore.FieldValue.serverTimestamp(), name: local.name }, { merge:true });
-      }catch(e){ /* ignore */ }
+      try{ await fb.roomRef.collection('players').doc(local.playerId).set({ lastSeen: firebase.firestore.FieldValue.serverTimestamp(), name: local.name }, { merge:true }); }catch(e){}
     }, 8000);
 
     state = State.Lobby;
   }
 
-  async function leaveRoom(){
-    if(fb.roomRef){
-      try{ await fb.roomRef.collection('players').doc(local.playerId).delete(); }catch(e){}
-    }
-    fb.unsubRoom && fb.unsubRoom(); fb.unsubRoom=null; room=null;
-    fb.unsubPlayers && fb.unsubPlayers(); fb.unsubPlayers=null; players=[];
-    clearInterval(heartbeatTimer); heartbeatTimer=null;
-    state = State.Join;
-  }
-
   async function startSharedRound(){
-    if(!(await fbInitIfNeeded())){ showToast("Ingen backend. Sett USE_FIREBASE=true"); return; }
-    const roomRef = fb.roomRef;
-    if(!roomRef){ showToast("Bli med i et rom først"); return; }
+    // If we somehow got to Lobby without a roomRef (slow SDK load), try to join now.
+    if(!fb.roomRef){ if(!local.name || !local.room){ showToast('Bli med i et rom først'); state = State.Join; return; } await joinRoom(local.name, local.room); if(!fb.roomRef){ return; } }
+
+    const ok = await fbInitIfNeeded(); if(!ok){ showToast('Backend ikke klar'); return; }
+
+    // Enforce min players (3) by active lastSeen window
+    const now = Date.now();
+    let actives = players.filter(p=> p.lastSeen && (now - p.lastSeen.toMillis()) < 20000);
+    if(actives.length < 3){ showToast('Minst 3 aktive spillere anbefales'); }
 
     await fb.db.runTransaction(async tx => {
-      const rsnap = await tx.get(roomRef);
-      const r = rsnap.data() || { round:{ status:'idle', id:0 } };
-      if(r.round && r.round.status==='active') return; // another device already started
-
-      // get players snapshot inside tx (not ideal in prod but ok here)
-      const psnap = await roomRef.collection('players').get();
-      const now = Date.now();
-      const actives = psnap.docs.map(d=>({ id:d.id, ...d.data() }))
-        .filter(p=> p.lastSeen && (now - p.lastSeen.toMillis()) < 20000);
+      const rsnap = await tx.get(fb.roomRef); const r = rsnap.data() || { round:{ status:'idle', id:0 } };
+      if(r.round && r.round.status==='active') return; // already started by someone else
+      // refresh players inside transaction
+      const psnap = await fb.roomRef.collection('players').get();
+      const now2 = Date.now();
+      actives = psnap.docs.map(d=>({ id:d.id, ...d.data() })).filter(p=> p.lastSeen && (now2 - p.lastSeen.toMillis()) < 20000);
       if(actives.length === 0) throw new Error('No active players');
-      const killer = pick(actives);
-      const weapon = pick(WEAPONS);
-
-      tx.set(roomRef, { round:{ id:(r.round?.id||0)+1, status:'active', killerId:killer.id, weapon, revealAt: firebase.firestore.FieldValue.serverTimestamp() } }, { merge:true });
+      const killer = pick(actives); const weapon = pick(WEAPONS);
+      tx.set(fb.roomRef, { round:{ id:(r.round?.id||0)+1, status:'active', killerId:killer.id, weapon, revealAt: firebase.firestore.FieldValue.serverTimestamp() } }, { merge:true });
     });
   }
 
-  async function endSharedRound(){
-    if(!(await fbInitIfNeeded())) return;
-    if(!fb.roomRef) return;
-    try{
-      await fb.roomRef.set({ round:{ status:'idle' } }, { merge:true });
-    }catch(e){ console.error(e); }
-  }
+  async function endSharedRound(){ try{ if(fb.roomRef){ await fb.roomRef.set({ round:{ status:'idle' } }, { merge:true }); } }catch(e){} }
 
   // ——————————————————————————————————————————————
-  // Local-only fallback (no Firebase): keep single-device mode
+  // Local-only fallback (not used when Firebase works)
   // ——————————————————————————————————————————————
-  let localNames = ["Andrè","Henry","Andreas","Rasmus"]; // four players local demo
   function localStart(){
-    // pick one killer among four
-    const killerName = pick(localNames);
-    result = { type: (killerName === local.name ? 'Kill' : 'Flee'), weapon: pick(WEAPONS) };
-    isKiller = (result.type==='Kill');
-    countdownStart = Date.now(); timerStartAt = countdownStart + COUNTDOWN_SECONDS*1000; state = State.Countdown;
+    // Simple single-device demo
+    result = { type: 'Kill', weapon: pick(WEAPONS) }; isKiller = true; const now = Date.now(); countdownStart = now; timerStartAt = now + COUNTDOWN_SECONDS*1000; state = State.Countdown;
   }
 
   // ——————————————————————————————————————————————
   // Input handling
   // ——————————————————————————————————————————————
-  canvas.addEventListener('pointerdown',()=>{ initAudio(); handlePrimary(); });
-  window.addEventListener('keydown', e=>{
-    if(e.key===' '||e.key==='Enter'){ initAudio(); handlePrimary(); }
-    if(e.key.toLowerCase()==='t'){ tryRunSelfTests(); }
-    if(e.key.toLowerCase()==='l'){ if(firebaseAvailable()) leaveRoom(); }
-  });
+  canvas.addEventListener('pointerdown', ()=>{ initAudio(); handlePrimary(); });
+  window.addEventListener('keydown', e=>{ if(e.key===' '||e.key==='Enter'){ initAudio(); handlePrimary(); } if(e.key.toLowerCase()==='t'){ tryRunSelfTests(); } });
 
-  function handlePrimary(){
-    if(state===State.Join){ promptJoin(); }
-    else if(state===State.Lobby){ firebaseAvailable()? startSharedRound() : localStart(); }
-    else if(state===State.Result){ state = State.RoundTimer; }
-    else if(state===State.RoundTimer){ endSharedRound(); state = firebaseAvailable()? State.Lobby : State.Join; }
-  }
-
-  function promptJoin(){
-    const name = (local.name || prompt("Ditt navn? (sing3 meng2)", local.name||"")) || "Spiller";
-    const room = firebaseAvailable() ? ((local.room || prompt("Romkode? (room code)", local.room||"MORD"))||"MORD").toUpperCase() : "LOCAL";
-    joinRoom(name, room);
+  async function handlePrimary(){
+    if(state===State.Join){
+      const name = (local.name || prompt('Ditt navn? (sing3 meng2)', local.name||'')) || 'Spiller';
+      const code = (local.room || prompt('Romkode?', local.room||'MORD')) || 'MORD';
+      await joinRoom(name, code);
+      return;
+    }
+    if(state===State.Lobby){
+      if(firebaseAvailable()) await startSharedRound(); else localStart();
+      return;
+    }
+    if(state===State.Result){ state = State.RoundTimer; return; }
+    if(state===State.RoundTimer){ await endSharedRound(); state = firebaseAvailable()? State.Lobby : State.Join; return; }
   }
 
   // ——————————————————————————————————————————————
-  // Drawing helpers
+  // Drawing helpers & screens
   // ——————————————————————————————————————————————
-  function drawBackground(t){
-    const g = ctx.createLinearGradient(0,0,W,H); const s = 0.5+0.5*Math.sin(t*0.0002);
+  function drawBG(t){
+    const g = ctx.createLinearGradient(0,0,W,H); const s=0.5+0.5*Math.sin(t*0.0002);
     g.addColorStop(0,`hsl(${lerp(210,265,s)},70%,10%)`); g.addColorStop(1,`hsl(${lerp(185,220,s)},80%,16%)`);
     ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
-    const r = Math.hypot(W,H)*0.55; const vg = ctx.createRadialGradient(CX,CY,r*0.2,CX,CY,r);
-    vg.addColorStop(0,"rgba(0,0,0,0)"); vg.addColorStop(1,"rgba(0,0,0,0.35)"); ctx.fillStyle=vg; ctx.fillRect(0,0,W,H);
+    const r=Math.hypot(W,H)*0.55; const vg=ctx.createRadialGradient(CX,CY,r*0.2,CX,CY,r); vg.addColorStop(0,'rgba(0,0,0,0)'); vg.addColorStop(1,'rgba(0,0,0,0.35)'); ctx.fillStyle=vg; ctx.fillRect(0,0,W,H);
   }
   function roundRect(x,y,w,h,r){ const rr=Math.min(r,w/2,h/2); ctx.beginPath(); ctx.moveTo(x+rr,y); ctx.arcTo(x+w,y,x+w,y+h,rr); ctx.arcTo(x+w,y+h,x,y+h,rr); ctx.arcTo(x,y+h,x,y,rr); ctx.arcTo(x,y,x+w,y,rr); ctx.closePath(); }
 
   function drawJoin(){
     ctx.save(); ctx.textAlign='center'; ctx.textBaseline='middle';
-    ctx.font = `800 ${Math.round(Math.min(W,H)*0.08)}px/1 ui-sans-serif`;
-    ctx.fillStyle='rgba(255,255,255,0.95)'; ctx.fillText('Moro med Mord', CX, CY-90);
-    ctx.font = `500 ${Math.round(Math.min(W,H)*0.028)}px/1.4 ui-sans-serif`;
-    ctx.fillStyle='rgba(255,255,255,0.8)';
-    const line1 = firebaseAvailable() ? "Trykk for å bli med i et rom (jyut6 'fong4 gaan1')" : "Trykk for lokal runde (utan rom)";
-    ctx.fillText(line1, CX, CY-20);
+    ctx.font=`800 ${Math.round(Math.min(W,H)*0.08)}px/1 ui-sans-serif`; ctx.fillStyle='rgba(255,255,255,0.95)'; ctx.fillText('Moro med Mord', CX, CY-90);
+    ctx.font=`500 ${Math.round(Math.min(W,H)*0.028)}px/1.4 ui-sans-serif`; ctx.fillStyle='rgba(255,255,255,0.8)';
+    const online = firebaseAvailable();
+    ctx.fillText(online?"Trykk for å bli med i et rom (fong4 gaan1)":"Firebase ikke konfigurert – lokal modus", CX, CY-20);
     ctx.fillText("'hoi1 ci2' = start", CX, CY+20);
-
-    const btn = { w: Math.min(W*0.7, 340), h: 64 };
-    btn.x = CX - btn.w/2; btn.y = CY + 80; btn.r = 18;
-    roundRect(btn.x, btn.y, btn.w, btn.h, btn.r);
-    const grad = ctx.createLinearGradient(btn.x,btn.y,btn.x+btn.w,btn.y+btn.h);
-    grad.addColorStop(0,'#7dd3fc'); grad.addColorStop(1,'#a78bfa'); ctx.fillStyle=grad; ctx.fill();
-    ctx.fillStyle='#0b0f19'; ctx.font = `800 22px/1 ui-sans-serif`; ctx.fillText('Trykk for å bli med', CX, btn.y+btn.h/2+2);
+    const b={w:Math.min(W*0.7,340),h:64}; b.x=CX-b.w/2; b.y=CY+80; b.r=18; roundRect(b.x,b.y,b.w,b.h,b.r); const grad=ctx.createLinearGradient(b.x,b.y,b.x+b.w,b.y+b.h); grad.addColorStop(0,'#7dd3fc'); grad.addColorStop(1,'#a78bfa'); ctx.fillStyle=grad; ctx.fill(); ctx.fillStyle='#0b0f19'; ctx.font='800 22px ui-sans-serif'; ctx.fillText('Trykk for å bli med', CX, b.y+b.h/2+2);
     ctx.restore();
   }
 
   function drawLobby(t){
     ctx.save(); ctx.textAlign='center'; ctx.textBaseline='middle';
-    ctx.font = `800 ${Math.round(Math.min(W,H)*0.06)}px/1 ui-sans-serif`;
-    ctx.fillStyle='rgba(255,255,255,0.95)'; ctx.fillText('Lobby', CX, CY-160);
-    ctx.font = `600 ${Math.round(Math.min(W,H)*0.028)}px/1.4 ui-sans-serif`;
-    ctx.fillStyle='rgba(255,255,255,0.85)';
-    ctx.fillText(firebaseAvailable()?`Rom: ${local.room}`:`Lokal modus`, CX, CY-110);
+    ctx.font=`800 ${Math.round(Math.min(W,H)*0.06)}px/1 ui-sans-serif`; ctx.fillStyle='rgba(255,255,255,0.95)'; ctx.fillText('Lobby', CX, CY-160);
+    ctx.font=`600 ${Math.round(Math.min(W,H)*0.028)}px/1.4 ui-sans-serif`; ctx.fillStyle='rgba(255,255,255,0.85)';
+    const online = firebaseAvailable();
+    ctx.fillText(online?`Rom: ${local.room}`:`Lokal modus`, CX, CY-110);
     ctx.fillText(`Navn: ${local.name||'Spiller'}`, CX, CY-80);
 
-    // Active players count
+    // Active players
     let activeCount = 1; let namesList = [local.name||'Spiller'];
-    if(firebaseAvailable()){
-      const now = Date.now();
-      const actives = players.filter(p=>p.lastSeen && (now - p.lastSeen.toMillis()) < 20000);
-      activeCount = actives.length; namesList = actives.map(p=>p.name||p.id);
-    }
-    ctx.fillText(`Aktive spillere: ${activeCount} (min 3 anbefalt)`, CX, CY-20);
+    if(online){ const now = Date.now(); const actives = players.filter(p=> p.lastSeen && (now - p.lastSeen.toMillis()) < 20000); activeCount = actives.length; namesList = actives.map(p=> p.name || p.id); }
+    ctx.fillText(`Aktive spillere: ${activeCount}`, CX, CY-20);
+    ctx.font=`500 ${Math.round(Math.min(W,H)*0.024)}px/1.6 ui-sans-serif`; ctx.fillStyle='rgba(255,255,255,0.75)'; ctx.fillText(namesList.join('  ·  '), CX, CY+20);
 
-    // Names
-    ctx.font = `500 ${Math.round(Math.min(W,H)*0.024)}px/1.6 ui-sans-serif`;
-    ctx.fillStyle='rgba(255,255,255,0.75)';
-    ctx.fillText(namesList.join('  ·  '), CX, CY+20);
-
-    // Start button
-    const btn = { w: Math.min(W*0.7, 360), h: 68 }; btn.x=CX-btn.w/2; btn.y=CY+90; btn.r=22;
-    roundRect(btn.x, btn.y, btn.w, btn.h, btn.r);
-    const grad = ctx.createLinearGradient(btn.x,btn.y,btn.x+btn.w,btn.y+btn.h);
-    grad.addColorStop(0,'#4ade80'); grad.addColorStop(1,'#22d3ee'); ctx.fillStyle=grad; ctx.fill();
-    ctx.fillStyle='#0b0f19'; ctx.font = `900 22px/1 ui-sans-serif`; ctx.fillText('Start runde', CX, btn.y+btn.h/2+2);
-
-    ctx.font = `500 ${Math.round(Math.min(W,H)*0.02)}px/1.4 ui-sans-serif`;
-    ctx.fillStyle='rgba(255,255,255,0.65)';
-    ctx.fillText("Trykk for å starte – én 'saat3' (sekund) etter reveal begynner 120s", CX, btn.y+btn.h+28);
+    const b={w:Math.min(W*0.7,360),h:68}; b.x=CX-b.w/2; b.y=CY+90; b.r=22; roundRect(b.x,b.y,b.w,b.h,b.r); const grad=ctx.createLinearGradient(b.x,b.y,b.x+b.w,b.y+b.h); grad.addColorStop(0,'#4ade80'); grad.addColorStop(1,'#22d3ee'); ctx.fillStyle=grad; ctx.fill(); ctx.fillStyle='#0b0f19'; ctx.font='900 22px ui-sans-serif'; ctx.fillText('Start runde', CX, b.y+b.h/2+2);
+    ctx.font=`500 ${Math.round(Math.min(W,H)*0.02)}px/1.4 ui-sans-serif`; ctx.fillStyle='rgba(255,255,255,0.65)'; ctx.fillText("Trykk for å starte – lyd: trykk en gang ('sing1 jam1')", CX, b.y+b.h+28);
     ctx.restore();
   }
 
   function drawCountdown(now){
-    // Sync to shared reveal time if available
-    const elapsed = Math.max(0, (now - countdownStart) / 1000);
-    const total = COUNTDOWN_SECONDS; const remaining = clamp(total - elapsed, 0, total);
-    const progress = clamp(elapsed/total, 0, 1);
-
-    const displayNum = Math.ceil(remaining); const segElapsed = elapsed - Math.floor(elapsed);
-    const scale = lerp(1.4,1.0,easeOutCubic(segElapsed));
-
-    const r = Math.min(W,H)*0.22; ctx.save(); ctx.translate(CX, CY);
+    const elapsed = Math.max(0, (now - countdownStart)/1000); const total=COUNTDOWN_SECONDS; const remaining=clamp(total - elapsed, 0, total); const progress = clamp(elapsed/total,0,1);
+    const displayNum = Math.ceil(remaining); const seg = elapsed - Math.floor(elapsed); const scale = 1.4 - 0.4*easeOutCubic(seg);
+    const r = Math.min(W,H)*0.22; ctx.save(); ctx.translate(CX,CY);
     ctx.beginPath(); ctx.arc(0,0,r,0,Math.PI*2); ctx.strokeStyle='rgba(255,255,255,0.12)'; ctx.lineWidth=Math.max(10,r*0.08); ctx.stroke();
     ctx.beginPath(); ctx.arc(0,0,r,-Math.PI/2,-Math.PI/2+progress*Math.PI*2); ctx.strokeStyle='rgba(255,255,255,0.9)'; ctx.lineCap='round'; ctx.lineWidth=Math.max(10,r*0.08); ctx.stroke();
     ctx.fillStyle='rgba(255,255,255,0.9)'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.font=`900 ${Math.round(Math.min(W,H)*0.22*scale)}px/1 ui-sans-serif`; ctx.fillText(String(displayNum),0,8);
-    ctx.font=`600 ${Math.round(Math.min(W,H)*0.03)}px/1 ui-sans-serif`; ctx.fillStyle='rgba(255,255,255,0.7)'; ctx.fillText('Nedtelling', 0, -r - Math.min(W,H)*0.06);
-    ctx.restore();
-
-    if(remaining<=0){ state = State.Result; }
+    ctx.font=`600 ${Math.round(Math.min(W,H)*0.03)}px/1 ui-sans-serif`; ctx.fillStyle='rgba(255,255,255,0.7)'; ctx.fillText('Nedtelling', 0, -r - Math.min(W,H)*0.06); ctx.restore();
+    if(remaining<=0) state = State.Result;
   }
 
-  function drawResult(t){
+  function drawResult(){
     const title = result?.type==='Kill' ? 'KILL' : 'FLEE';
-    const sub = result?.type==='Kill' ? ('Hemmelige roller') : 'Kom dere unna!';
-
     ctx.save(); ctx.textAlign='center'; ctx.textBaseline='middle';
-    const k=(Math.sin(t*0.004)+1)/2; const r=Math.min(W,H)*lerp(0.22,0.27,k); const ring=ctx.createRadialGradient(CX,CY,r*0.2,CX,CY,r);
-    if(result?.type==='Kill'){ ring.addColorStop(0,'rgba(255,64,64,0.14)'); } else { ring.addColorStop(0,'rgba(64,224,255,0.12)'); } ring.addColorStop(1,'rgba(0,0,0,0)');
-    ctx.fillStyle=ring; ctx.fillRect(0,0,W,H);
-
-    ctx.font = `900 ${Math.round(Math.min(W,H)*0.16)}px/1 ui-sans-serif`; ctx.fillStyle = result?.type==='Kill' ? 'rgba(255,110,110,0.95)' : 'rgba(150,240,255,0.95)'; ctx.shadowColor='rgba(0,0,0,0.6)'; ctx.shadowBlur=30; ctx.shadowOffsetY=10; ctx.fillText(title, CX, CY - Math.min(W,H)*0.06);
-    ctx.font = `700 ${Math.round(Math.min(W,H)*0.05)}px/1 ui-sans-serif`; ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.shadowBlur=10; ctx.shadowOffsetY=2; ctx.fillText(sub, CX, CY + Math.min(W,H)*0.03);
-
-    if(result?.type==='Kill' && result?.weapon){ ctx.font = `700 ${Math.round(Math.min(W,H)*0.04)}px/1 ui-sans-serif`; ctx.fillStyle='rgba(255,230,230,0.95)'; ctx.fillText("Våpen: "+result.weapon, CX, CY + Math.min(W,H)*0.10); }
-
-    ctx.font = `500 ${Math.round(Math.min(W,H)*0.022)}px/1 ui-sans-serif`; ctx.fillStyle='rgba(255,255,255,0.8)'; ctx.shadowBlur=0; ctx.shadowOffsetY=0; ctx.fillText("'si4 gaan3' (tid) begynner straks", CX, CY + Math.min(W,H)*0.18);
+    ctx.font=`900 ${Math.round(Math.min(W,H)*0.16)}px/1 ui-sans-serif`; ctx.fillStyle = result?.type==='Kill' ? 'rgba(255,110,110,0.95)' : 'rgba(150,240,255,0.95)'; ctx.fillText(title, CX, CY - Math.min(W,H)*0.06);
+    ctx.font=`700 ${Math.round(Math.min(W,H)*0.05)}px/1 ui-sans-serif`; ctx.fillStyle='rgba(255,255,255,0.9)'; ctx.fillText(result?.type==='Kill' ? 'Hemmelige roller' : 'Kom dere unna!', CX, CY + Math.min(W,H)*0.03);
+    if(result?.type==='Kill' && result?.weapon){ ctx.font=`700 ${Math.round(Math.min(W,H)*0.04)}px/1 ui-sans-serif`; ctx.fillStyle='rgba(255,230,230,0.95)'; ctx.fillText('Våpen: '+result.weapon, CX, CY + Math.min(W,H)*0.10); }
+    ctx.font=`500 ${Math.round(Math.min(W,H)*0.022)}px/1 ui-sans-serif`; ctx.fillStyle='rgba(255,255,255,0.8)'; ctx.fillText("'si4 gaan3' (tid) begynner straks", CX, CY + Math.min(W,H)*0.18);
     ctx.restore();
   }
 
   function drawRoundTimer(now){
-    const startMs = timerStartAt || (Date.now());
-    const elapsed = (now - startMs)/1000; const remaining = clamp(ROUND_SECONDS - elapsed, 0, ROUND_SECONDS);
-    const progress = 1 - remaining/ROUND_SECONDS;
-
+    const start = timerStartAt || Date.now(); const elapsed=(now-start)/1000; const remaining=clamp(ROUND_SECONDS-elapsed,0,ROUND_SECONDS); const progress=1-remaining/ROUND_SECONDS;
     ctx.save(); ctx.textAlign='center'; ctx.textBaseline='middle';
-    const r = Math.min(W,H)*0.25; ctx.translate(CX,CY);
+    const r=Math.min(W,H)*0.25; ctx.translate(CX,CY);
     ctx.beginPath(); ctx.arc(0,0,r,0,Math.PI*2); ctx.strokeStyle='rgba(255,255,255,0.12)'; ctx.lineWidth=Math.max(10,r*0.08); ctx.stroke();
     ctx.beginPath(); ctx.arc(0,0,r,-Math.PI/2,-Math.PI/2+progress*Math.PI*2); ctx.strokeStyle='rgba(255,255,255,0.9)'; ctx.lineCap='round'; ctx.lineWidth=Math.max(10,r*0.08); ctx.stroke();
     const mm=Math.floor(remaining/60), ss=Math.floor(remaining%60); const timeStr=`${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}`;
@@ -403,45 +318,36 @@ index.html
   // Minimal self-tests (press 'T' or add ?test=1)
   // ——————————————————————————————————————————————
   function tryRunSelfTests(){
-    const results=[]; const assert=(name,cond)=>results.push({name,pass:!!cond});
+    const results=[]; const assert=(n,c)=>results.push({name:n,pass:!!c});
     try{
       assert('Canvas context', !!ctx);
       assert('20 weapons', WEAPONS.length===20);
-      // Local start test (no Firebase path)
-      const prev = USE_FIREBASE; USE_FIREBASE=false; local.name='Tester'; localStart();
-      assert('Entered countdown', state===State.Countdown);
-      state=State.Result; // simulate reveal done
-      TEST_MODE=true; timerStartAt=Date.now()-ROUND_SECONDS*1000-100; drawRoundTimer(performance.now());
-      assert('Timer end triggers', true);
-      TEST_MODE=false; USE_FIREBASE=prev;
-    }catch(e){ results.push({name:'Exception', pass:false, error:String(e)}); }
-    console.group('Self-tests'); for(const r of results){ console[r.pass?'log':'error'](`${r.pass?'PASS':'FAIL'}: ${r.name}`); if(r.error) console.error(r.error); } console.groupEnd();
-    showToast(results.every(r=>r.pass)?'TESTS PASS':'TESTS FAIL');
+      // Local fallback flow
+      const prev = USE_FIREBASE; USE_FIREBASE=false; localStart(); assert('Entered countdown', state===State.Countdown); state=State.Result; TEST_MODE=true; timerStartAt=Date.now()-ROUND_SECONDS*1000-100; drawRoundTimer(performance.now()); assert('Timer end triggers', true); TEST_MODE=false; USE_FIREBASE=prev;
+    }catch(e){ results.push({name:'Exception',pass:false,error:String(e)}); }
+    console.group('Self-tests'); for(const r of results){ console[r.pass?'log':'error'](`${r.pass?'PASS':'FAIL'}: ${r.name}`); if(r.error) console.error(r.error); } console.groupEnd(); showToast(results.every(r=>r.pass)?'TESTS PASS':'TESTS FAIL');
   }
 
   function showToast(text){
-    const t0 = performance.now();
-    function tick(){ const t=(performance.now()-t0)/1000; if(t>2) return; ctx.save(); ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.font=`700 ${Math.round(Math.min(W,H)*0.03)}px/1 ui-sans-serif`; ctx.fillStyle='rgba(0,0,0,0.4)'; ctx.fillRect(CX-220, H*0.12-24, 440, 48); ctx.fillStyle='#fff'; ctx.fillText(text, CX, H*0.12); ctx.restore(); requestAnimationFrame(tick);} requestAnimationFrame(tick);
+    const t0 = performance.now(); function tick(){ const t=(performance.now()-t0)/1000; if(t>2) return; ctx.save(); ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.font=`700 ${Math.round(Math.min(W,H)*0.03)}px/1 ui-sans-serif`; ctx.fillStyle='rgba(0,0,0,0.4)'; ctx.fillRect(CX-240, H*0.12-24, 480, 48); ctx.fillStyle='#fff'; ctx.fillText(text, CX, H*0.12); ctx.restore(); requestAnimationFrame(tick);} requestAnimationFrame(tick);
   }
 
   // ——————————————————————————————————————————————
   // Main loop
   // ——————————————————————————————————————————————
   function loop(t){
-    drawBackground(t);
+    drawBG(t);
     const qp = new URLSearchParams(location.search); if(qp.get('test')==='1'){ tryRunSelfTests(); history.replaceState({},'',location.pathname); }
     if(state===State.Join) drawJoin();
     else if(state===State.Lobby) drawLobby(t);
     else if(state===State.Countdown) drawCountdown(t);
-    else if(state===State.Result) { drawResult(t); state = State.RoundTimer; }
+    else if(state===State.Result){ drawResult(); state = State.RoundTimer; }
     else if(state===State.RoundTimer) drawRoundTimer(t);
     requestAnimationFrame(loop);
   }
   requestAnimationFrame(loop);
-
-  // Auto-join prompt if no identity
-  if(state===State.Join){ setTimeout(()=>{ /* allow first frame */ }, 0); }
 })();
+});
 </script>
 </body>
 </html>
