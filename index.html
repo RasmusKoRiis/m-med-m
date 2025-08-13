@@ -72,6 +72,9 @@ window.addEventListener('load', function(){
   const pick = arr => arr[Math.floor(Math.random()*arr.length)];
   const uid = () => Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
   const qp = new URLSearchParams(location.search);
+  // Reset button geometry (CSS px; HiDPI handled by setTransform)
+    const resetBtn = { x: 0, y: 0, w: 92, h: 44, r: 22 };
+
 
   // Persist local identity
   let local = {
@@ -244,7 +247,24 @@ window.addEventListener('load', function(){
   // ——————————————————————————————————————————————
   // Input handling
   // ——————————————————————————————————————————————
-  canvas.addEventListener('pointerdown', ()=>{ initAudio(); handlePrimary(); });
+canvas.addEventListener('pointerdown', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+
+  // Hit test the reset pill first
+  if (x >= resetBtn.x && x <= resetBtn.x + resetBtn.w &&
+      y >= resetBtn.y && y <= resetBtn.y + resetBtn.h) {
+    if (confirm('Reset? Dette sletter navn/rom og laster siden på nytt (zoi3 loi4 hoi1 ci2).')) {
+      resetLocal();
+    }
+    return;
+  }
+
+  // Normal primary action
+  initAudio();
+  handlePrimary();
+});
   window.addEventListener('keydown', e=>{
     if(e.key===' '||e.key==='Enter'){ initAudio(); handlePrimary(); }
     if(e.key.toLowerCase()==='t'){ tryRunSelfTests(); }
@@ -289,6 +309,30 @@ window.addEventListener('load', function(){
     const r=Math.hypot(W,H)*0.55; const vg=ctx.createRadialGradient(CX,CY,r*0.2,CX,CY,r); vg.addColorStop(0,'rgba(0,0,0,0)'); vg.addColorStop(1,'rgba(0,0,0,0.35)'); ctx.fillStyle=vg; ctx.fillRect(0,0,W,H);
   }
   function roundRect(x,y,w,h,r){ const rr=Math.min(r,w/2,h/2); ctx.beginPath(); ctx.moveTo(x+rr,y); ctx.arcTo(x+w,y,x+w,y+h,rr); ctx.arcTo(x+w,y+h,x,y+h,rr); ctx.arcTo(x,y+h,x,y,rr); ctx.arcTo(x,y,x+w,y,rr); ctx.closePath(); }
+
+    function drawResetButton() {
+    const margin = 16;
+    resetBtn.x = W - resetBtn.w - margin;
+    resetBtn.y = H - resetBtn.h - margin;
+
+    ctx.save();
+    roundRect(resetBtn.x, resetBtn.y, resetBtn.w, resetBtn.h, resetBtn.r);
+    const g = ctx.createLinearGradient(
+        resetBtn.x, resetBtn.y, resetBtn.x + resetBtn.w, resetBtn.y + resetBtn.h
+    );
+    g.addColorStop(0, '#fca5a5'); // soft red
+    g.addColorStop(1, '#f87171'); // red
+    ctx.fillStyle = g;
+    ctx.fill();
+
+    ctx.fillStyle = '#0b0f19';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = '800 16px ui-sans-serif';
+    ctx.fillText('Reset', resetBtn.x + resetBtn.w / 2, resetBtn.y + resetBtn.h / 2 + 1);
+    ctx.restore();
+    }
+
 
   function drawJoin(){
     ctx.save(); ctx.textAlign='center'; ctx.textBaseline='middle';
@@ -403,6 +447,11 @@ function loop(rafTs) {
   else if (state === State.Countdown) drawCountdown(nowMs); // pass epoch ms
   else if (state === State.Result) {  drawResult(rafTs); state = State.RoundTimer; }
   else if (state === State.RoundTimer)drawRoundTimer(nowMs); // pass epoch ms
+
+  // Draw the phone-friendly reset pill
+  drawResetButton();
+
+
 
   requestAnimationFrame(loop);
 }
