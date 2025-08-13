@@ -17,7 +17,7 @@
 <body>
 <canvas id="c" tabindex="0" aria-label="Moro med Mord" role="application"></canvas>
 <script>
-// Delay app start until window 'load' so Firebase SDKs (defer) are guaranteed to be ready.
+// Start only after window 'load' so Firebase defer scripts are ready
 window.addEventListener('load', function(){
 (function(){
   "use strict";
@@ -34,11 +34,13 @@ window.addEventListener('load', function(){
   // Toggle Firebase usage. Must be true + valid FIREBASE_CONFIG for online lobby.
   let USE_FIREBASE = true;
 
-  // Paste your Firebase config here
- const FIREBASE_CONFIG = {
+  // Paste your Firebase config here (complete object from console)
+  const FIREBASE_CONFIG = {
     apiKey: "AIzaSyAjWKqzsZkaCOe7iheahP-3oet2E5XIKVM",
     authDomain: "m-med-m.firebaseapp.com",
     projectId: "m-med-m",
+    appId: "1:269443451664:web:d7322bc7bec2b81e0c3395",            // recommended
+    messagingSenderId: "PASTE_SENDER"  // recommended
   };
 
   // ——————————————————————————————————————————————
@@ -69,6 +71,7 @@ window.addEventListener('load', function(){
   const easeOutCubic = t => 1 - Math.pow(1-t, 3);
   const pick = arr => arr[Math.floor(Math.random()*arr.length)];
   const uid = () => Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  const qp = new URLSearchParams(location.search);
 
   // Persist local identity
   let local = {
@@ -112,22 +115,35 @@ window.addEventListener('load', function(){
   let timerStartAt = null;        // ms when 120s begins (revealAt + 3s)
 
   // Firebase refs
-  let fb = { app:null, db:null, roomRef:null, unsubRoom:null, unsubPlayers:null };
+  let fb = { app:null, db:null, roomRef:null, unsubRoom:null, unsubPlayers:null, backendReady:false };
   let room = null;       // room doc
   let players = [];      // array of player docs
   let heartbeatTimer = null;
 
   // ——————————————————————————————————————————————
-  // Firebase init (robust)
+  // Firebase init (robust + network fallbacks)
   // ——————————————————————————————————————————————
   function firebaseAvailable(){
-    return USE_FIREBASE && typeof window.firebase !== 'undefined' && FIREBASE_CONFIG && FIREBASE_CONFIG.projectId && !/PASTE_/.test(FIREBASE_CONFIG.projectId);
+    const cfgOK = FIREBASE_CONFIG && FIREBASE_CONFIG.projectId && !/PASTE_/.test(FIREBASE_CONFIG.projectId);
+    return USE_FIREBASE && typeof window.firebase !== 'undefined' && cfgOK;
   }
   async function fbInitIfNeeded(){
     if(!firebaseAvailable()) return false;
     if(!fb.app){
-      try{ fb.app = firebase.initializeApp(FIREBASE_CONFIG); fb.db = firebase.firestore(); }
-      catch(e){ console.error('Firebase init failed', e); return false; }
+      try{
+        fb.app = firebase.initializeApp(FIREBASE_CONFIG);
+        fb.db = firebase.firestore();
+        // Debug level via ?debug=1
+        firebase.firestore.setLogLevel(qp.get('debug')==='1' ? 'debug' : 'error');
+        // Transport fixes for 400 WebChannel (corporate proxies, ad-blockers, third‑party cookie issues)
+        const settings = { experimentalAutoDetectLongPolling: true };
+        const transport = qp.get('transport');
+        if(transport === 'longpoll') settings.experimentalForceLongPolling = true; // hard force
+        if(transport === 'fetchstreams') settings.useFetchStreams = true;          // modern streaming
+        if(transport === 'webchannel') { settings.experimentalAutoDetectLongPolling = false; }
+        fb.db.settings(settings);
+        fb.backendReady = true;
+      } catch(e){ console.error('Firebase init failed', e); fb.backendReady=false; return false; }
     }
     return true;
   }
@@ -140,14 +156,18 @@ window.addEventListener('load', function(){
     localStorage.setItem('mmm_name', local.name); localStorage.setItem('mmm_room', local.room);
 
     const ok = await fbInitIfNeeded();
-    if(!ok){ showToast("Backend ikke klar – prøv igjen om 1s"); state = State.Join; return; }
+    if(!ok){ showToast("Backend ikke klar – sjekk Firebase config"); state = State.Join; return; }
 
     fb.roomRef = fb.db.collection('rooms').doc(local.room);
     // Ensure room exists
-    await fb.roomRef.set({ createdAt: firebase.firestore.FieldValue.serverTimestamp(), round:{ status:'idle', id:0 } }, { merge:true });
+    await fb.roomRef.set({ createdAt: firebase.firestore.FieldValue.serverTimestamp(), round:{ status:'idle', id:0 } }, { merge:true }).catch(e=>{
+      showToast('Kunne ikke lage rom (sjekk regler/API‑key)'); console.error(e);
+    });
 
     // Create/update player doc
-    await fb.roomRef.collection('players').doc(local.playerId).set({ name: local.name, joinedAt: firebase.firestore.FieldValue.serverTimestamp(), lastSeen: firebase.firestore.FieldValue.serverTimestamp() }, { merge:true });
+    await fb.roomRef.collection('players').doc(local.playerId).set({ name: local.name, joinedAt: firebase.firestore.FieldValue.serverTimestamp(), lastSeen: firebase.firestore.FieldValue.serverTimestamp() }, { merge:true }).catch(e=>{
+      showToast('Kunne ikke registrere spiller'); console.error(e);
+    });
 
     // subscribe room doc
     fb.unsubRoom && fb.unsubRoom();
@@ -163,54 +183,58 @@ window.addEventListener('load', function(){
         // back to lobby
         result = null; isKiller=false; timerStartAt=null; if(state!==State.Join) state = State.Lobby;
       }
+    }, err=>{
+      showToast('Room subscription feilet'); console.error(err);
     });
 
     // subscribe players collection
     fb.unsubPlayers && fb.unsubPlayers();
     fb.unsubPlayers = fb.roomRef.collection('players').onSnapshot(snap=>{
       players = snap.docs.map(d=>({ id:d.id, ...d.data() }));
-    });
+    }, err=>{ console.error('Players sub feilet', err); });
 
     // heartbeat
     clearInterval(heartbeatTimer);
     heartbeatTimer = setInterval(async ()=>{
-      try{ await fb.roomRef.collection('players').doc(local.playerId).set({ lastSeen: firebase.firestore.FieldValue.serverTimestamp(), name: local.name }, { merge:true }); }catch(e){}
+      try{ await fb.roomRef.collection('players').doc(local.playerId).set({ lastSeen: firebase.firestore.FieldValue.serverTimestamp(), name: local.name }, { merge:true }); }catch(e){ /* ignore */ }
     }, 8000);
 
     state = State.Lobby;
   }
 
   async function startSharedRound(){
-    // If we somehow got to Lobby without a roomRef (slow SDK load), try to join now.
+    // Safety: auto-join if SDK was slow
     if(!fb.roomRef){ if(!local.name || !local.room){ showToast('Bli med i et rom først'); state = State.Join; return; } await joinRoom(local.name, local.room); if(!fb.roomRef){ return; } }
-
     const ok = await fbInitIfNeeded(); if(!ok){ showToast('Backend ikke klar'); return; }
 
-    // Enforce min players (3) by active lastSeen window
+    // Enforce min players warning (still allows start)
     const now = Date.now();
     let actives = players.filter(p=> p.lastSeen && (now - p.lastSeen.toMillis()) < 20000);
-    if(actives.length < 3){ showToast('Minst 3 aktive spillere anbefales'); }
+    if(actives.length < 2){ showToast('Få spillere – invite flere (hoi1 ci2 zeoi3 hou2)'); }
 
-    await fb.db.runTransaction(async tx => {
-      const rsnap = await tx.get(fb.roomRef); const r = rsnap.data() || { round:{ status:'idle', id:0 } };
-      if(r.round && r.round.status==='active') return; // already started by someone else
-      // refresh players inside transaction
-      const psnap = await fb.roomRef.collection('players').get();
-      const now2 = Date.now();
-      actives = psnap.docs.map(d=>({ id:d.id, ...d.data() })).filter(p=> p.lastSeen && (now2 - p.lastSeen.toMillis()) < 20000);
-      if(actives.length === 0) throw new Error('No active players');
-      const killer = pick(actives); const weapon = pick(WEAPONS);
-      tx.set(fb.roomRef, { round:{ id:(r.round?.id||0)+1, status:'active', killerId:killer.id, weapon, revealAt: firebase.firestore.FieldValue.serverTimestamp() } }, { merge:true });
-    });
+    try{
+      await fb.db.runTransaction(async tx => {
+        const rsnap = await tx.get(fb.roomRef); const r = rsnap.data() || { round:{ status:'idle', id:0 } };
+        if(r.round && r.round.status==='active') return; // someone else started
+        const psnap = await fb.roomRef.collection('players').get();
+        const now2 = Date.now();
+        actives = psnap.docs.map(d=>({ id:d.id, ...d.data() })).filter(p=> p.lastSeen && (now2 - p.lastSeen.toMillis()) < 20000);
+        if(actives.length === 0) throw new Error('No active players');
+        const killer = pick(actives); const weapon = pick(WEAPONS);
+        tx.set(fb.roomRef, { round:{ id:(r.round?.id||0)+1, status:'active', killerId:killer.id, weapon, revealAt: firebase.firestore.FieldValue.serverTimestamp() } }, { merge:true });
+      });
+    } catch(e){
+      console.error('Start round failed', e);
+      showToast('Start feilet – sjekk regler/API‑key/App Check');
+    }
   }
 
-  async function endSharedRound(){ try{ if(fb.roomRef){ await fb.roomRef.set({ round:{ status:'idle' } }, { merge:true }); } }catch(e){} }
+  async function endSharedRound(){ try{ if(fb.roomRef){ await fb.roomRef.set({ round:{ status:'idle' } }, { merge:true }); } }catch(e){ console.error(e); } }
 
   // ——————————————————————————————————————————————
   // Local-only fallback (not used when Firebase works)
   // ——————————————————————————————————————————————
   function localStart(){
-    // Simple single-device demo
     result = { type: 'Kill', weapon: pick(WEAPONS) }; isKiller = true; const now = Date.now(); countdownStart = now; timerStartAt = now + COUNTDOWN_SECONDS*1000; state = State.Countdown;
   }
 
@@ -218,7 +242,12 @@ window.addEventListener('load', function(){
   // Input handling
   // ——————————————————————————————————————————————
   canvas.addEventListener('pointerdown', ()=>{ initAudio(); handlePrimary(); });
-  window.addEventListener('keydown', e=>{ if(e.key===' '||e.key==='Enter'){ initAudio(); handlePrimary(); } if(e.key.toLowerCase()==='t'){ tryRunSelfTests(); } });
+  window.addEventListener('keydown', e=>{
+    if(e.key===' '||e.key==='Enter'){ initAudio(); handlePrimary(); }
+    if(e.key.toLowerCase()==='t'){ tryRunSelfTests(); }
+    if(e.key.toLowerCase()==='r'){ resetLocal(); }
+    if(e.key.toLowerCase()==='d'){ diagnoseBackend(); }
+  });
 
   async function handlePrimary(){
     if(state===State.Join){
@@ -233,6 +262,18 @@ window.addEventListener('load', function(){
     }
     if(state===State.Result){ state = State.RoundTimer; return; }
     if(state===State.RoundTimer){ await endSharedRound(); state = firebaseAvailable()? State.Lobby : State.Join; return; }
+  }
+
+  function resetLocal(){
+    try{ localStorage.removeItem('mmm_name'); localStorage.removeItem('mmm_room'); }catch(e){}
+    location.reload();
+  }
+
+  async function diagnoseBackend(){
+    const ok = await fbInitIfNeeded(); if(!ok){ showToast('Firebase ikke init'); return; }
+    const testRef = fb.db.collection('diagnostics').doc('ping');
+    try{ await testRef.set({ t: Date.now(), ua: navigator.userAgent }); showToast('Backend OK'); }
+    catch(e){ showToast('Backend skriver ikke'); console.error('Diagnostics write failed:', e); }
   }
 
   // ——————————————————————————————————————————————
@@ -259,19 +300,25 @@ window.addEventListener('load', function(){
 
   function drawLobby(t){
     ctx.save(); ctx.textAlign='center'; ctx.textBaseline='middle';
-    ctx.font=`800 ${Math.round(Math.min(W,H)*0.06)}px/1 ui-sans-serif`; ctx.fillStyle='rgba(255,255,255,0.95)'; ctx.fillText('Lobby', CX, CY-160);
+    ctx.font=`800 ${Math.round(Math.min(W,H)*0.06)}px/1 ui-sans-serif`; ctx.fillStyle='rgba(255,255,255,0.95)'; ctx.fillText('Lobby', CX, CY-180);
     ctx.font=`600 ${Math.round(Math.min(W,H)*0.028)}px/1.4 ui-sans-serif`; ctx.fillStyle='rgba(255,255,255,0.85)';
     const online = firebaseAvailable();
-    ctx.fillText(online?`Rom: ${local.room}`:`Lokal modus`, CX, CY-110);
-    ctx.fillText(`Navn: ${local.name||'Spiller'}`, CX, CY-80);
+    ctx.fillText(online?`Rom: ${local.room}`:`Lokal modus`, CX, CY-130);
+    ctx.fillText(`Navn: ${local.name||'Spiller'}`, CX, CY-100);
 
     // Active players
     let activeCount = 1; let namesList = [local.name||'Spiller'];
     if(online){ const now = Date.now(); const actives = players.filter(p=> p.lastSeen && (now - p.lastSeen.toMillis()) < 20000); activeCount = actives.length; namesList = actives.map(p=> p.name || p.id); }
-    ctx.fillText(`Aktive spillere: ${activeCount}`, CX, CY-20);
-    ctx.font=`500 ${Math.round(Math.min(W,H)*0.024)}px/1.6 ui-sans-serif`; ctx.fillStyle='rgba(255,255,255,0.75)'; ctx.fillText(namesList.join('  ·  '), CX, CY+20);
+    ctx.fillText(`Aktive spillere: ${activeCount}`, CX, CY-40);
+    ctx.font=`500 ${Math.round(Math.min(W,H)*0.024)}px/1.6 ui-sans-serif`; ctx.fillStyle='rgba(255,255,255,0.75)'; ctx.fillText(namesList.join('  ·  '), CX, CY);
 
-    const b={w:Math.min(W*0.7,360),h:68}; b.x=CX-b.w/2; b.y=CY+90; b.r=22; roundRect(b.x,b.y,b.w,b.h,b.r); const grad=ctx.createLinearGradient(b.x,b.y,b.x+b.w,b.y+b.h); grad.addColorStop(0,'#4ade80'); grad.addColorStop(1,'#22d3ee'); ctx.fillStyle=grad; ctx.fill(); ctx.fillStyle='#0b0f19'; ctx.font='900 22px ui-sans-serif'; ctx.fillText('Start runde', CX, b.y+b.h/2+2);
+    // Backend status
+    ctx.font=`500 ${Math.round(Math.min(W,H)*0.02)}px/1.2 ui-sans-serif`; ctx.fillStyle='rgba(255,255,255,0.65)';
+    const backend = fb.backendReady? `Backend: ✓ ${FIREBASE_CONFIG.projectId}` : 'Backend: ✗';
+    ctx.fillText(backend + "  —  R = reset, D = diagnose", CX, CY+40);
+
+    // Start button
+    const b={w:Math.min(W*0.7,360),h:68}; b.x=CX-b.w/2; b.y=CY+100; b.r=22; roundRect(b.x,b.y,b.w,b.h,b.r); const grad=ctx.createLinearGradient(b.x,b.y,b.x+b.w,b.y+b.h); grad.addColorStop(0,'#4ade80'); grad.addColorStop(1,'#22d3ee'); ctx.fillStyle=grad; ctx.fill(); ctx.fillStyle='#0b0f19'; ctx.font='900 22px ui-sans-serif'; ctx.fillText('Start runde', CX, b.y+b.h/2+2);
     ctx.font=`500 ${Math.round(Math.min(W,H)*0.02)}px/1.4 ui-sans-serif`; ctx.fillStyle='rgba(255,255,255,0.65)'; ctx.fillText("Trykk for å starte – lyd: trykk en gang ('sing1 jam1')", CX, b.y+b.h+28);
     ctx.restore();
   }
@@ -329,7 +376,7 @@ window.addEventListener('load', function(){
   }
 
   function showToast(text){
-    const t0 = performance.now(); function tick(){ const t=(performance.now()-t0)/1000; if(t>2) return; ctx.save(); ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.font=`700 ${Math.round(Math.min(W,H)*0.03)}px/1 ui-sans-serif`; ctx.fillStyle='rgba(0,0,0,0.4)'; ctx.fillRect(CX-240, H*0.12-24, 480, 48); ctx.fillStyle='#fff'; ctx.fillText(text, CX, H*0.12); ctx.restore(); requestAnimationFrame(tick);} requestAnimationFrame(tick);
+    const t0 = performance.now(); function tick(){ const t=(performance.now()-t0)/1000; if(t>2.2) return; ctx.save(); ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.font=`700 ${Math.round(Math.min(W,H)*0.03)}px/1 ui-sans-serif`; ctx.fillStyle='rgba(0,0,0,0.45)'; ctx.fillRect(CX-260, H*0.12-24, 520, 48); ctx.fillStyle='#fff'; ctx.fillText(text, CX, H*0.12); ctx.restore(); requestAnimationFrame(tick);} requestAnimationFrame(tick);
   }
 
   // ——————————————————————————————————————————————
@@ -337,7 +384,7 @@ window.addEventListener('load', function(){
   // ——————————————————————————————————————————————
   function loop(t){
     drawBG(t);
-    const qp = new URLSearchParams(location.search); if(qp.get('test')==='1'){ tryRunSelfTests(); history.replaceState({},'',location.pathname); }
+    if(qp.get('test')==='1'){ tryRunSelfTests(); history.replaceState({},'',location.pathname); }
     if(state===State.Join) drawJoin();
     else if(state===State.Lobby) drawLobby(t);
     else if(state===State.Countdown) drawCountdown(t);
