@@ -133,15 +133,18 @@ window.addEventListener('load', function(){
       try{
         fb.app = firebase.initializeApp(FIREBASE_CONFIG);
         fb.db = firebase.firestore();
-        // Debug level via ?debug=1
-        firebase.firestore.setLogLevel(qp.get('debug')==='1' ? 'debug' : 'error');
-        // Transport fixes for 400 WebChannel (corporate proxies, ad-blockers, third‑party cookie issues)
-        const settings = { experimentalAutoDetectLongPolling: true };
-        const transport = qp.get('transport');
-        if(transport === 'longpoll') settings.experimentalForceLongPolling = true; // hard force
-        if(transport === 'fetchstreams') settings.useFetchStreams = true;          // modern streaming
-        if(transport === 'webchannel') { settings.experimentalAutoDetectLongPolling = false; }
-        fb.db.settings(settings);
+
+        // log level if needed
+        firebase.firestore.setLogLevel(new URLSearchParams(location.search).get('debug')==='1' ? 'debug' : 'error');
+
+        // HARD force long-polling so WebChannel never runs
+        fb.db.settings({
+        experimentalAutoDetectLongPolling: false,
+        experimentalForceLongPolling: true,
+        experimentalLongPollingOptions: { timeoutSeconds: 30 },
+        useFetchStreams: false
+        });
+
         fb.backendReady = true;
       } catch(e){ console.error('Firebase init failed', e); fb.backendReady=false; return false; }
     }
