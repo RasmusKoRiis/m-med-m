@@ -385,17 +385,29 @@ window.addEventListener('load', function(){
   // ——————————————————————————————————————————————
   // Main loop
   // ——————————————————————————————————————————————
-  function loop(t){
-    drawBG(t);
-    if(qp.get('test')==='1'){ tryRunSelfTests(); history.replaceState({},'',location.pathname); }
-    if(state===State.Join) drawJoin();
-    else if(state===State.Lobby) drawLobby(t);
-    else if(state===State.Countdown) drawCountdown(t);
-    else if(state===State.Result){ drawResult(); state = State.RoundTimer; }
-    else if(state===State.RoundTimer) drawRoundTimer(t);
-    requestAnimationFrame(loop);
+function loop(rafTs) {
+  // Keep fancy background animations tied to rAF time
+  drawBG(rafTs);
+
+  // Use absolute time (si4 gaan3) for all countdown math
+  const nowMs = Date.now();
+
+  const qp = new URLSearchParams(location.search);
+  if (qp.get('test') === '1') {
+    tryRunSelfTests();
+    history.replaceState({}, '', location.pathname);
   }
+
+  if (state === State.Join)           drawJoin();
+  else if (state === State.Lobby)     drawLobby(rafTs);     // rAF time OK here
+  else if (state === State.Countdown) drawCountdown(nowMs); // pass epoch ms
+  else if (state === State.Result) {  drawResult(rafTs); state = State.RoundTimer; }
+  else if (state === State.RoundTimer)drawRoundTimer(nowMs); // pass epoch ms
+
   requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
 })();
 });
 </script>
